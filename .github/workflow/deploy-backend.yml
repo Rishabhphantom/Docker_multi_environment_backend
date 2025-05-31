@@ -1,88 +1,71 @@
 name: Deploy Backend - Multi-Stage (dev, qa, prod)
 
-
 on:
- push:
-   branches:
-     - dev
-     - qa
-     - main
-
+  push:
+    branches:
+      - dev
+      - qa
+      - main
 
 jobs:
- deploy:
-   runs-on: ubuntu-latest
-   steps:
-     - name: Checkout code
-       uses: actions/checkout@v3
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
 
-     - name: Set up Node.js
-       uses: actions/setup-node@v3
-       with:
-         node-version: '18'
+      - name: Install dependencies
+        run: npm ci
 
+      - name: Build application
+        run: npm run build
 
-     - name: Install dependencies
-       run: npm ci
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
 
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v3
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
-     - name: Build application
-       run: npm run build
+      - name: Login to AWS ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
 
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          build-args: |
+            ENV_TYPE=${{ github.ref_name }}
+            PORT=${{ env.PORT }}
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/<your-ecr-repo-name>:${{ github.ref_name }}
 
-     - name: Set up Docker Buildx
-       uses: docker/setup-buildx-action@v2
+      - name: Deploy to EC2 via SSH
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.EC2_IP }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            cd /home/ubuntu/backend
 
+            echo "Pulling latest image..."
+            docker pull ${{ steps.login-ecr.outputs.registry }}/<your-ecr-repo-name>:${{ github.ref_name }}
 
-     - name: Log in to Docker Hub
-       uses: docker/login-action@v2
-       with:
-         username: ${{ secrets.DOCKER_HUB_USERNAME }}
-         password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
+            echo "Stopping existing container if any..."
+            docker-compose -f docker-compose.yml stop backend-${{ github.ref_name }}
+            docker-compose -f docker-compose.yml rm -f backend-${{ github.ref_name }}
 
-
-     - name: Build and Push Docker Image
-       uses: docker/build-push-action@v5
-       id: docker_build
-       with:
-         context: .
-         file: ./Dockerfile
-         push: true
-         build-args: |
-           ENV_TYPE=${{ github.ref_name }}
-           PORT=${{ env.PORT }}
-         tags: |
-           ${{ secrets.DOCKER_HUB_USERNAME }}/your-backend:${{ github.ref_name }}
-
-
-     - name: Deploy to EC2 via SSH
-       uses: appleboy/ssh-action@master
-       with:
-         host: ${{ secrets.EC2_IP }}
-         username: ${{ secrets.EC2_USER }}
-         key: ${{ secrets.EC2_SSH_KEY }}
-         script: |
-           # Navigate to app directory
-           cd /home/ubuntu/backend
-
-
-           echo "Stopping existing container if any..."
-           docker stop backend-${{ github.ref_name }} || true
-           docker rm backend-${{ github.ref_name }} || true
-
-
-           echo "Pulling latest image..."
-           docker pull ${{ secrets.DOCKER_HUB_USERNAME }}/your-backend:${{ github.ref_name }}
-
-
-           echo "Deploying new version..."
-           docker run -d \
-             --name backend-${{ github.ref_name }} \
-             -p ${{ env.PORT }}:${{ env.PORT }} \
-             -e MYSQL_HOST=mysql-${{ github.ref_name }} \
-             -e MYSQL_PORT=3306 \
-             -e MYSQL_USER=${{ github.ref_name }}_user \
-             -e MYSQL_PASSWORD=Asher976123@ \
-             -e MYSQL_DB=myapp_${{ github.ref_name }} \
-             ${{ secrets.DOCKER_HUB_USERNAME }}/your-backend:${{ github.ref_name }}
+            echo "Deploying new version..."
+            docker-compose -f docker-compose.yml up -d backend-${{ github.ref_name }}
